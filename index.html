@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>미로찾기</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --panel: #16213e;
+    --wall: #e2e8f0;
+    --path: #0f3460;
+    --player: #f9c74f;
+    --pellet: #ffe8a3;
+    --goal: #43aa8b;
+    --text: #e2e8f0;
+    --accent: #e94560;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px 16px;
+    gap: 16px;
+  }
+  h1 { font-size: 1.6rem; letter-spacing: 2px; }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+  }
+  select, button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #334;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  .info {
+    display: flex;
+    gap: 24px;
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .info span b { color: var(--player); }
+  canvas {
+    background: var(--path);
+    border: 3px solid var(--wall);
+    border-radius: 4px;
+    max-width: 100%;
+    touch-action: none;
+  }
+  .hint { font-size: 0.85rem; opacity: 0.7; text-align: center; }
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(2, 56px);
+    gap: 6px;
+  }
+  .dpad button { font-size: 1.3rem; padding: 0; }
+  .dpad .up { grid-column: 2; }
+  .dpad .left { grid-column: 1; grid-row: 2; }
+  .dpad .down { grid-column: 2; grid-row: 2; }
+  .dpad .right { grid-column: 3; grid-row: 2; }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  .overlay.show { display: flex; }
+  .modal {
+    background: var(--panel);
+    padding: 32px 40px;
+    border-radius: 12px;
+    text-align: center;
+    border: 2px solid var(--goal);
+  }
+  .modal h2 { color: var(--goal); margin-bottom: 12px; }
+  .modal p { margin-bottom: 20px; }
+</style>
+</head>
+<body>
+  <h1>🧩 미로찾기</h1>
+
+  <div class="controls">
+    <label>난이도
+      <select id="difficulty">
+        <option value="11">쉬움 (11×11)</option>
+        <option value="17" selected>보통 (17×17)</option>
+        <option value="25">어려움 (25×25)</option>
+        <option value="35">극한 (35×35)</option>
+      </select>
+    </label>
+    <button id="newBtn">새 미로</button>
+  </div>
+
+  <div class="info">
+    <span>⏱ 시간: <b id="time">0.0</b>초</span>
+    <span>👣 이동: <b id="moves">0</b></span>
+    <span>🍪 과자: <b id="pellets">0</b></span>
+  </div>
+
+  <canvas id="maze"></canvas>
+  <p class="hint">방향키 / WASD 로 이동 (꾹 누르면 연속 이동) · 과자를 먹으며 초록 칸까지 가세요</p>
+
+  <div class="dpad">
+    <button class="up" data-dir="up">▲</button>
+    <button class="left" data-dir="left">◀</button>
+    <button class="down" data-dir="down">▼</button>
+    <button class="right" data-dir="right">▶</button>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="modal">
+      <h2>🎉 탈출 성공!</h2>
+      <p id="result"></p>
+      <button id="againBtn">다시 하기</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('maze');
+  const ctx = canvas.getContext('2d');
+  const timeEl = document.getElementById('time');
+  const movesEl = document.getElementById('moves');
+  const pelletsEl = document.getElementById('pellets');
+  const overlay = document.getElementById('overlay');
+  const resultEl = document.getElementById('result');
+  const difficultyEl = document.getElementById('difficulty');
+
+  const CANVAS_SIZE = 560;
+  const DIRS = {
+    up:    { dx: 0,  dy: -1, angle: -Math.PI / 2 },
+    down:  { dx: 0,  dy: 1,  angle: Math.PI / 2 },
+    left:  { dx: -1, dy: 0,  angle: Math.PI },
+    right: { dx: 1,  dy: 0,  angle: 0 },
+  };
+  const MOUTH_MAX = Math.PI * 0.22;   // 입 최대 벌림 각도(반쪽)
+  const MOUTH_SPEED = 0.018;          // 입 개폐 속도 (rad/ms)
+  const CHOMP_DURATION = 250;         // 마지막 이동 후 입을 계속 움직이는 시간(ms)
+  const KEY_MAP = {
+    ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+    w: 'up', s: 'down', a: 'left', d: 'right',
+    W: 'up', S: 'down', A: 'left', D: 'right',
+  };
+
+  let state = null;
+
+  /** 재귀적 백트래킹으로 미로 생성. 1 = 벽, 0 = 길. size는 홀수여야 함. */
+  function generateMaze(size) {
+    const grid = Array.from({ length: size }, () => Array(size).fill(1));
+    const stack = [[1, 1]];
+    grid[1][1] = 0;
+
+    while (stack.length > 0) {
+      const [cx, cy] = stack[stack.length - 1];
+      const neighbors = Object.values(DIRS)
+        .map(({ dx, dy }) => ({ nx: cx + dx * 2, ny: cy + dy * 2, wx: cx + dx, wy: cy + dy }))
+        .filter(({ nx, ny }) => nx > 0 && ny > 0 && nx < size - 1 && ny < size - 1 && grid[ny][nx] === 1);
+
+      if (neighbors.length === 0) {
+        stack.pop();
+        continue;
+      }
+      const { nx, ny, wx, wy } = neighbors[Math.floor(Math.random() * neighbors.length)];
+      grid[wy][wx] = 0;
+      grid[ny][nx] = 0;
+      stack.push([nx, ny]);
+    }
+    return grid;
+  }
+
+  /** 시작·도착 칸을 제외한 모든 길 위에 과자 배치 */
+  function createPellets(grid, size) {
+    const pellets = new Set();
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const isStart = x === 1 && y === 1;
+        const isGoal = x === size - 2 && y === size - 2;
+        if (grid[y][x] === 0 && !isStart && !isGoal) pellets.add(`${x},${y}`);
+      }
+    }
+    return pellets;
+  }
+
+  /** 새 게임 상태 생성 */
+  function createGame(size) {
+    const grid = generateMaze(size);
+    return {
+      size,
+      grid,
+      pellets: createPellets(grid, size),
+      eaten: 0,
+      player: { x: 1, y: 1 },
+      facing: 'right',
+      lastMoveAt: 0,
+      goal: { x: size - 2, y: size - 2 },
+      moves: 0,
+      startTime: null,
+      finished: false,
+      timerId: null,
+    };
+  }
+
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name);
+
+  /** 진행 방향을 바라보며 입을 벌린 플레이어 그리기 */
+  function drawPlayer(cell, now) {
+    const { player, facing, lastMoveAt } = state;
+    const cx = (player.x + 0.5) * cell;
+    const cy = (player.y + 0.5) * cell;
+    const r = cell * 0.38;
+    const isChomping = now - lastMoveAt < CHOMP_DURATION;
+    const mouth = isChomping ? Math.abs(Math.sin(now * MOUTH_SPEED)) * MOUTH_MAX : MOUTH_MAX * 0.25;
+    const base = DIRS[facing].angle;
+
+    ctx.fillStyle = cssVar('--player');
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, base + mouth, base + Math.PI * 2 - mouth);
+    ctx.closePath();
+    ctx.fill();
+
+    // 눈
+    const eyeOffset = r * 0.45;
+    const ex = cx + Math.cos(base - Math.PI / 2) * eyeOffset + Math.cos(base) * r * 0.15;
+    const ey = cy + Math.sin(base - Math.PI / 2) * eyeOffset + Math.sin(base) * r * 0.15;
+    ctx.fillStyle = cssVar('--bg');
+    ctx.beginPath();
+    ctx.arc(ex, ey, r * 0.13, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** 캔버스 전체 그리기 */
+  function draw(now = performance.now()) {
+    const { size, grid, goal, pellets } = state;
+    const cell = CANVAS_SIZE / size;
+    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    ctx.fillStyle = cssVar('--wall');
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (grid[y][x] === 1) ctx.fillRect(x * cell, y * cell, cell + 0.5, cell + 0.5);
+      }
+    }
+
+    ctx.fillStyle = cssVar('--goal');
+    ctx.fillRect(goal.x * cell, goal.y * cell, cell, cell);
+
+    ctx.fillStyle = cssVar('--pellet');
+    pellets.forEach((key) => {
+      const [x, y] = key.split(',').map(Number);
+      ctx.beginPath();
+      ctx.arc((x + 0.5) * cell, (y + 0.5) * cell, Math.max(1.5, cell * 0.1), 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    drawPlayer(cell, now);
+  }
+
+  /** 입 애니메이션을 위한 렌더 루프 */
+  function renderLoop(now) {
+    if (state) draw(now);
+    requestAnimationFrame(renderLoop);
+  }
+
+  function elapsedSeconds() {
+    if (!state.startTime) return 0;
+    return (performance.now() - state.startTime) / 1000;
+  }
+
+  function updateHud() {
+    timeEl.textContent = elapsedSeconds().toFixed(1);
+    movesEl.textContent = state.moves;
+    pelletsEl.textContent = state.eaten;
+  }
+
+  /** 과자 먹을 때 짧은 "와카" 효과음 (첫 사용자 입력 이후에만 재생 가능) */
+  let audioCtx = null;
+  function playChomp() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const t = audioCtx.currentTime;
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(420, t);
+      osc.frequency.exponentialRampToValueAtTime(180, t + 0.07);
+      gain.gain.setValueAtTime(0.04, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.09);
+    } catch (_) {
+      // 오디오 미지원 환경에서는 조용히 무시
+    }
+  }
+
+  function stopTimer() {
+    if (state.timerId) clearInterval(state.timerId);
+  }
+
+  /** 플레이어 이동 처리. 첫 이동 시 타이머 시작, 도착 시 종료. */
+  function move(dir) {
+    if (!state || state.finished) return;
+    const { dx, dy } = DIRS[dir];
+    const nx = state.player.x + dx;
+    const ny = state.player.y + dy;
+    // 벽이면 방향만 바꾸고 제자리
+    if (state.grid[ny]?.[nx] !== 0) {
+      state = { ...state, facing: dir };
+      return;
+    }
+
+    if (!state.startTime) {
+      state = { ...state, startTime: performance.now(), timerId: setInterval(updateHud, 100) };
+    }
+
+    const key = `${nx},${ny}`;
+    const ate = state.pellets.has(key);
+    const pellets = ate ? new Set([...state.pellets].filter((k) => k !== key)) : state.pellets;
+    state = {
+      ...state,
+      player: { x: nx, y: ny },
+      facing: dir,
+      lastMoveAt: performance.now(),
+      pellets,
+      eaten: ate ? state.eaten + 1 : state.eaten,
+      moves: state.moves + 1,
+    };
+    if (ate) playChomp();
+    updateHud();
+
+    if (nx === state.goal.x && ny === state.goal.y) finish();
+  }
+
+  function finish() {
+    stopTimer();
+    stopHold();
+    state = { ...state, finished: true };
+    updateHud();
+    const total = state.eaten + state.pellets.size;
+    resultEl.textContent = `${elapsedSeconds().toFixed(1)}초 · ${state.moves}회 이동 · 과자 ${state.eaten}/${total}개`;
+    overlay.classList.add('show');
+  }
+
+  function newGame() {
+    if (state) stopTimer();
+    stopHold();
+    overlay.classList.remove('show');
+    difficultyEl.blur();
+    window.focus();
+    const size = Number(difficultyEl.value);
+    canvas.width = CANVAS_SIZE;
+    canvas.height = CANVAS_SIZE;
+    state = createGame(size);
+    updateHud();
+  }
+
+  // 키/버튼을 누르고 있는 동안 일정 간격으로 연속 이동
+  const HOLD_INTERVAL = 90;
+  let heldDir = null;
+  let holdTimerId = null;
+
+  function startHold(dir) {
+    if (heldDir === dir) return;
+    stopHold();
+    heldDir = dir;
+    move(dir);
+    holdTimerId = setInterval(() => move(heldDir), HOLD_INTERVAL);
+  }
+
+  function stopHold(dir) {
+    if (dir && heldDir !== dir) return;
+    clearInterval(holdTimerId);
+    holdTimerId = null;
+    heldDir = null;
+  }
+
+  // 이벤트 바인딩
+  document.addEventListener('keydown', (e) => {
+    const dir = KEY_MAP[e.key];
+    if (!dir) return;
+    e.preventDefault();
+    if (!e.repeat) startHold(dir);
+  });
+  document.addEventListener('keyup', (e) => {
+    const dir = KEY_MAP[e.key];
+    if (dir) stopHold(dir);
+  });
+  window.addEventListener('blur', () => stopHold());
+
+  document.querySelectorAll('.dpad button').forEach((btn) => {
+    const dir = btn.dataset.dir;
+    btn.addEventListener('pointerdown', (e) => { e.preventDefault(); startHold(dir); });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach((evt) => {
+      btn.addEventListener(evt, () => stopHold(dir));
+    });
+  });
+  document.getElementById('newBtn').addEventListener('click', newGame);
+  document.getElementById('againBtn').addEventListener('click', newGame);
+  difficultyEl.addEventListener('change', newGame);
+
+  newGame();
+  requestAnimationFrame(renderLoop);
+})();
+</script>
+</body>
+</html>
